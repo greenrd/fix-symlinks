@@ -150,8 +150,19 @@ object FixSymlinks extends App {
     } yield 0
 
   override def run(args: List[String]): ZIO[Environment, Nothing, Int] = {
-    runImpl(args).provideSome(c => new Console with Files.Live {
+    val pathArgs = args.filterNot(_.startsWith("-"))
+    if(args.contains("--help") || args.contains("-h")) {
+      putStrLn("-h\tDisplay this help") *>
+      putStrLn("-n\tDry run - do not touch the filesystem, just print out what would be done") *> IO.succeed(0)
+    } else if(args.contains("-n")) {
+      putStrLn("INFO: Dry run mode! Any changes shown below have not actually been performed!") *>
+      runImpl(pathArgs).provideSome(c => new Console with Files.DryRun {
         override val console = c.console
       })
+    } else {
+      runImpl(pathArgs).provideSome(c => new Console with Files.Live {
+        override val console = c.console
+      })
+    }
   }
 }
