@@ -16,7 +16,14 @@ import org.greenrd.fixsymlinks.modules.Files
 @deriving(Monoid)
 case class ScanResults(symlinks: List[Path], directories: List[Path])
 
+case class Stats(nSymLinks: Int) extends AnyVal {
+  override def toString = s"$nSymLinks symbolic links"
+}
+
 object FixSymlinks extends App {
+
+  /** Left indicates no more symlinks found. */
+  type SymlinkData = Either[Stats, (Path, Set[Path])]
 
   def recreateSymbolicLink(source: Path, newDestination: Path): ZIO[Files, Nothing, Path] = (for {
     files <- ZIO.access[Files](_.files)
@@ -28,21 +35,25 @@ object FixSymlinks extends App {
     * 
     * @param The queue to read choices and failures from
     */
-  def askUserLoop(queue: Queue[(Path, Set[Path])]): ZIO[Console with Files, Nothing, Unit] = {
+  def askUserLoop(queue: Queue[SymlinkData]): ZIO[Console with Files, Nothing, Unit] = {
     for {
       next <- queue.take
       _ <- next match {
-        case (path, possibleDestinations) =>
-          if(possibleDestinations.isEmpty) {
-            putStrLn(s"ERROR: No target found for broken symlink $path")
-          } else {
-            IO.effect(assert(possibleDestinations.size > 1)).orDie *>
+        case Right((path, possibleDestinations)) =>
+          (possibleDestinations.headOption match {
+            case Some(only) if possibleDestinations.size == 1 =>
+              putStrLn(s"INFO: Repointed broken symlink $path to $only")
+            case None =>
+              putStrLn(s"ERROR: No target found for broken symlink $path")
+            case _ =>
               putStrLn(s"${possibleDestinations.size} destinations found for $path:") *>
               (for {
                 newDestination <- ConsoleUtils.choice(possibleDestinations)
                 _ <- recreateSymbolicLink(path, newDestination).orDie
               } yield ())
-          }
+          }) *> askUserLoop(queue)
+        case Left(stats) =>
+          putStrLn(s"Done - scanned $stats")
       }
     } yield ()
   }
@@ -81,7 +92,7 @@ object FixSymlinks extends App {
     * @param paths The directories to scan recursively for broken symlinks
     * @param queue The queue to enqueue choices and failures into
     */
-  def scanAndTryToFix(paths: List[Path], queue: Queue[(Path, Set[Path])]): ZIO[Files, Nothing, Int] = {
+  def scanAndTryToFix(paths: List[Path], queue: Queue[SymlinkData]): ZIO[Files, Nothing, Stats] = {
 
     def tryToFix(symlink: Path, oldDest: Path): ZIO[Files, Nothing, Unit] = {
       val name = oldDest.getFileName
@@ -92,12 +103,13 @@ object FixSymlinks extends App {
           case Some(only) if possibilities.size == 1 =>
             recreateSymbolicLink(symlink, only)
           case _ =>
-            queue.offer(symlink -> possibilities)
+            IO.succeed(())
         }
+        _ <- queue.offer(Right(symlink -> possibilities))
       } yield ()
     }
 
-    def process(path: Path): ZIO[Files, Nothing, Int] = {
+    def process(path: Path): ZIO[Files, Nothing, Stats] = {
       val z = Monoid[ScanResults].zero
       for {
         files <- ZIO.access[Files](_.files)
@@ -119,23 +131,21 @@ object FixSymlinks extends App {
             _ <- tryToFix(symlink, dest).whenM(files.exists(dest).orDie.map(!_))
           } yield ()
         }
-        subdirCount <- scanAndTryToFix(scanResults.directories, queue)
-      } yield scanResults.symlinks.size + subdirCount
+        subdirs <- scanAndTryToFix(scanResults.directories, queue)
+      } yield Stats(scanResults.symlinks.size + subdirs.nSymLinks)
     }
 
-    ZIO.foldLeft(paths)(0) { (count, path) => process(path).map(count + _) }
+    ZIO.foldLeft(paths)(Stats(0)) { (count, path) => process(path).map(s => Stats(count.nSymLinks + s.nSymLinks)) }
   }
 
   def runImpl(args: List[String]): ZIO[Console with Files, Nothing, Int] =
     for {
-      queue <- ZQueue.bounded[(Path, Set[Path])](1024)
+      queue <- ZQueue.bounded[SymlinkData](1024)
       files <- ZIO.access[Files](_.files)
       dirs <- ZIO.foreach(args)(arg => files.parsePath(arg).orDie)
-      nSymLinks <- (for {
-        interactiveFiber <- askUserLoop(queue).fork
-        count <- scanAndTryToFix(dirs, queue)
-      } yield count).supervise
-      _ <- putStrLn(s"Done - scanned $nSymLinks symbolic links")
+      interactiveFiber <- askUserLoop(queue).fork
+      nSymLinks <- scanAndTryToFix(dirs, queue)
+      _ <- queue.offer(Left(nSymLinks))
     } yield 0
 
   override def run(args: List[String]): ZIO[Environment, Nothing, Int] = {
