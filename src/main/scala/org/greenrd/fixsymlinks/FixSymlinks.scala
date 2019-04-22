@@ -63,8 +63,8 @@ object FixSymlinks extends App {
     * @param path A non-existing path
     */
   def findAncestorThatExists(path: Path): ZIO[Files, IOException, Path] = {
-    val parent = path.getParent
     for {
+      parent <- Option(path.getParent).map(IO.succeed).getOrElse(IO.fail(new IOException(s"Root $path does not exist")))
       files <- ZIO.access[Files](_.files)
       parentExists <- files.exists(parent)
       result <- if(parentExists) IO.succeed(parent) else findAncestorThatExists(parent)
@@ -128,7 +128,8 @@ object FixSymlinks extends App {
         _ <- ZIO.foreach(scanResults.symlinks) { symlink =>
           for {
             dest <- files.readSymbolicLink(symlink).orDie
-            _ <- tryToFix(symlink, dest).whenM(files.exists(dest).orDie.map(!_))
+            absDest = symlink.resolveSibling(dest)
+            _ <- tryToFix(symlink, absDest).whenM(files.exists(absDest).orDie.map(!_))
           } yield ()
         }
         subdirs <- scanAndTryToFix(scanResults.directories, queue)
