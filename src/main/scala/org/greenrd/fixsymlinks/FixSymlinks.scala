@@ -123,9 +123,7 @@ object FixSymlinks extends App {
       } yield scanResults.symlinks.size + subdirCount
     }
 
-    for {
-      counts <- ZIO.foreach(paths)(process)
-    } yield counts.sum
+    ZIO.foldLeft(paths)(0) { (count, path) => process(path).map(count + _) }
   }
 
   def runImpl(args: List[String]): ZIO[Console with Files, Nothing, Int] =
