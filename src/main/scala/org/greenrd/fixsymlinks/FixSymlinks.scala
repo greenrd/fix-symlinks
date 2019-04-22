@@ -81,7 +81,7 @@ object FixSymlinks extends App {
     * @param paths The directories to scan recursively for broken symlinks
     * @param queue The queue to enqueue choices and failures into
     */
-  def scanAndTryToFix(paths: List[Path], queue: Queue[(Path, Set[Path])]): ZIO[Files, Nothing, Unit] = {
+  def scanAndTryToFix(paths: List[Path], queue: Queue[(Path, Set[Path])]): ZIO[Files, Nothing, Int] = {
 
     def tryToFix(symlink: Path, oldDest: Path): ZIO[Files, Nothing, Unit] = {
       val name = oldDest.getFileName
@@ -97,7 +97,7 @@ object FixSymlinks extends App {
       } yield ()
     }
 
-    def process(path: Path): ZIO[Files, Nothing, Unit] = {
+    def process(path: Path): ZIO[Files, Nothing, Int] = {
       val z = Monoid[ScanResults].zero
       for {
         files <- ZIO.access[Files](_.files)
@@ -119,13 +119,13 @@ object FixSymlinks extends App {
             _ <- tryToFix(symlink, dest).whenM(files.exists(dest).orDie.map(!_))
           } yield ()
         }
-        _ <- scanAndTryToFix(scanResults.directories, queue)
-      } yield ()
+        subdirCount <- scanAndTryToFix(scanResults.directories, queue)
+      } yield scanResults.symlinks.size + subdirCount
     }
 
     for {
-      _ <- ZIO.foreach(paths)(process)
-    } yield ()
+      counts <- ZIO.foreach(paths)(process)
+    } yield counts.sum
   }
 
   def runImpl(args: List[String]): ZIO[Console with Files, Nothing, Int] =
@@ -133,8 +133,11 @@ object FixSymlinks extends App {
       queue <- ZQueue.bounded[(Path, Set[Path])](1024)
       files <- ZIO.access[Files](_.files)
       dirs <- ZIO.foreach(args)(arg => files.parsePath(arg).orDie)
-      finderFiber <- (scanAndTryToFix(dirs, queue) *> queue.shutdown).fork
-      _ <- askUserLoop(queue)
+      nSymLinks <- (for {
+        interactiveFiber <- askUserLoop(queue).fork
+        count <- scanAndTryToFix(dirs, queue)
+      } yield count).supervise
+      _ <- putStrLn(s"Done - scanned $nSymLinks symbolic links")
     } yield 0
 
   override def run(args: List[String]): ZIO[Environment, Nothing, Int] = {
