@@ -139,7 +139,7 @@ object FixSymlinks extends App {
     } yield 0
 
   override def run(args: List[String]): ZIO[Environment, Nothing, Int] = {
-    runImpl(args).provideSome[Console](c => new Console with Files.Live {
+    runImpl(args).provideSome(c => new Console with Files.Live {
         override val console = c.console
       })
   }
