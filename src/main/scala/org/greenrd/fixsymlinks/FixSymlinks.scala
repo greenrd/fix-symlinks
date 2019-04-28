@@ -11,6 +11,9 @@ import scalaz.zio.console._
 
 import collection.immutable.Set
 
+import nequi.zio.logger
+import nequi.zio.logger.Slf4jLogger
+
 import org.greenrd.fixsymlinks.modules.Files
 
 @deriving(Monoid)
@@ -20,7 +23,9 @@ case class Stats(nSymLinks: Int) extends AnyVal {
   override def toString = s"$nSymLinks symbolic links"
 }
 
-object FixSymlinks extends App {
+object FixSymlinks extends App with Slf4jLogger {
+
+  override val clazz = sourcecode.File()
 
   /** Left indicates no more symlinks found. */
   type SymlinkData = Either[Stats, (Path, Set[Path])]
@@ -42,18 +47,18 @@ object FixSymlinks extends App {
         case Right((path, possibleDestinations)) =>
           (possibleDestinations.headOption match {
             case Some(only) if possibleDestinations.size == 1 =>
-              putStrLn(s"INFO: Repointed broken symlink $path to $only")
+              logger.info(s"Repointed broken symlink $path to $only")
             case None =>
-              putStrLn(s"ERROR: No target found for broken symlink $path")
+              logger.error(s"No target found for broken symlink $path")
             case _ =>
-              putStrLn(s"${possibleDestinations.size} destinations found for $path:") *>
+              logger.info(s"${possibleDestinations.size} destinations found for $path:") *>
               (for {
                 newDestination <- ConsoleUtils.choice(possibleDestinations)
                 _ <- recreateSymbolicLink(path, newDestination).orDie
               } yield ())
           }) *> askUserLoop(queue)
         case Left(stats) =>
-          putStrLn(s"Done - scanned $stats")
+          logger.info(s"Done - scanned $stats")
       }
     } yield ()
   }
@@ -144,9 +149,11 @@ object FixSymlinks extends App {
       queue <- ZQueue.bounded[SymlinkData](1024)
       files <- ZIO.access[Files](_.files)
       dirs <- ZIO.foreach(args)(arg => files.parsePath(arg).orDie)
-      interactiveFiber <- askUserLoop(queue).fork
-      nSymLinks <- scanAndTryToFix(dirs, queue)
-      _ <- queue.offer(Left(nSymLinks))
+      scanFiber <- (for {
+        nSymLinks <- scanAndTryToFix(dirs, queue)
+        _ <- queue.offer(Left(nSymLinks))
+      } yield ()).fork
+      _ <- askUserLoop(queue)
     } yield 0
 
   override def run(args: List[String]): ZIO[Environment, Nothing, Int] = {
@@ -155,7 +162,7 @@ object FixSymlinks extends App {
       putStrLn("-h\tDisplay this help") *>
       putStrLn("-n\tDry run - do not touch the filesystem, just print out what would be done") *> IO.succeed(0)
     } else if(args.contains("-n")) {
-      putStrLn("INFO: Dry run mode! Any changes shown below have not actually been performed!") *>
+      logger.info("Dry run mode! Any changes shown below have not actually been performed!") *>
       runImpl(pathArgs).provideSome(c => new Console with Files.DryRun {
         override val console = c.console
       })

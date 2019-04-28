@@ -1,7 +1,7 @@
 package org.greenrd.fixsymlinks.modules
 
-import java.io.{FileNotFoundException, IOException, UncheckedIOException}
-import java.nio.file.{Files => JFiles, InvalidPathException, LinkOption, Path, Paths}
+import java.io.{IOException, UncheckedIOException}
+import java.nio.file.{Files => JFiles, InvalidPathException, LinkOption, NoSuchFileException, Path, Paths}
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.stream.Stream
 
@@ -57,7 +57,7 @@ object Files {
       }
 
     override def exists(p: Path) = readBasicAttributes(p).foldM({
-        case fnf: FileNotFoundException => IO.succeed(false)
+        case nsf: NoSuchFileException => IO.succeed(false)
         case ex => IO.fail(ex)
       }, _ => IO.succeed(true))
 
